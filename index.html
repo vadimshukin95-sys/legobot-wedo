@@ -1076,7 +1076,15 @@ function loopCount(it){
 }
 /* ---- motor state. Power and direction are remembered but never assumed:
    until a program sets both, Motor On For does nothing. ---- */
-const motorState={power:null,dir:null};
+const motorState={power:null,dir:null,on:false};
+/* Как в приложении LEGO WeDo 2.0: блоки направления сразу включают мотор,
+   а мощность и направление, если их не задали, берутся по умолчанию. */
+const DEFAULT_MOTOR_LEVEL=8;
+const DEFAULT_DIR=-1;
+function motorPowerNow(){ return motorState.power==null ? levelToPower(DEFAULT_MOTOR_LEVEL) : motorState.power; }
+function motorDirNow(){ return motorState.dir==null ? DEFAULT_DIR : motorState.dir; }
+async function motorStart(){ motorState.on=true; updateStop(); return motorRun(motorPowerNow()*motorDirNow()); }
+async function motorStop(){ motorState.on=false; updateStop(); return motorRun(0); }
 const DEFAULT_SECONDS=3;   /* until On For carries a value (Stage 10) */
 const DEFAULT_LEVEL=10;    /* likewise for Motor Power */
 
@@ -1271,15 +1279,16 @@ async function execBlock(it,r){
     case 'MotorPowerBlock':{
       const lvl=inputNumber(it,DEFAULT_LEVEL);
       if(lvl==null) log('Motor Power: no input attached — power left unset');
-      else { motorState.power=levelToPower(lvl); log('power set to '+motorState.power+'%'); }
+      else { motorState.power=levelToPower(lvl); log('power set to '+motorState.power+'%');
+             if(motorState.on) await motorStart(); }
       await sleep(STEP,r); break;
     }
     case 'MotorThisWayBlock':
-      motorState.dir=-1; log('direction set: this way');  await sleep(STEP,r); break;
+      motorState.dir=-1; log('direction set: this way — motor on'); await motorStart(); await sleep(STEP,r); break;
     case 'MotorThatWayBlock':
-      motorState.dir=1;  log('direction set: that way');  await sleep(STEP,r); break;
+      motorState.dir=1;  log('direction set: that way — motor on'); await motorStart(); await sleep(STEP,r); break;
     case 'MotorOffBlock':
-      await motorRun(0); await sleep(STEP,r); break;
+      await motorStop(); await sleep(STEP,r); break;
     case 'WaitForBlock':{
       if(!it.input){ log('Wait For skipped — no input attached'); await sleep(STEP,r); break; }
       await waitForInput(it,r);
@@ -1338,19 +1347,12 @@ async function execBlock(it,r){
       await sleep(STEP,r); break;
     }
     case 'MotorOnForBlock':{
-      if(motorState.power==null||motorState.dir==null){
-        log('Motor On For skipped — '+
-            (motorState.power==null?'no power set':'')+
-            (motorState.power==null&&motorState.dir==null?' and ':'')+
-            (motorState.dir==null?'no direction set':''));
-        await sleep(STEP,r); break;
-      }
       const secs=inputNumber(it,DEFAULT_SECONDS)??DEFAULT_SECONDS;
-      await motorRun(motorState.power*motorState.dir);
+      await motorStart();
       /* the stop is in a finally so the motor cannot be left spinning by an
          error, a stop press, or the program being edited mid-run */
       try{ await sleep(secs*1000,r); }
-      finally{ await motorRun(0); }
+      finally{ await motorStop(); }
       break;
     }
     default: await sleep(STEP,r);
@@ -1446,17 +1448,17 @@ function stopAll(){ stacks.slice().forEach(stopStack); }
 /* Chrome throttles timers in a backgrounded tab, so a running On For could
    overshoot its duration by a long way. Halt everything instead. */
 function haltEverything(reason){
-  if(runners.size===0) return;
+  if(runners.size===0&&!motorState.on) return;
   log('halted — '+reason);
   stopAll(); stopSound();
-  motorRun(0);            /* best effort; the On For finally also stops it */
+  motorStop();            /* best effort; the On For finally also stops it */
 }
 document.addEventListener('visibilitychange',()=>{
   if(document.hidden) haltEverything('app left the foreground');
 });
 addEventListener('pagehide',()=>haltEverything('page closed'));
 function updateStop(){
-  document.getElementById('stop').classList.toggle('active',runners.size>0);
+  document.getElementById('stop').classList.toggle('active',runners.size>0||!!(typeof motorState!=='undefined'&&motorState.on));
 }
 
 let anchors=[], ejectAnim=null;
@@ -2049,7 +2051,10 @@ const slopFor=p => p.pt==='touch' ? 12 : 6;
 addEventListener('pointermove',ev=>{
   if(pending&&!drag){
     const dx=ev.clientX-pending.sx, dy=ev.clientY-pending.sy, slop=slopFor(pending);
-    if(pending.from==='tray'){
+    if(pending.from==='tray'&&pending.pt==='mouse'){
+      if(Math.hypot(dx,dy)<slop) return;
+      beginDrag(ev);
+    }else if(pending.from==='tray'){
       if(Math.abs(dx)>Math.abs(dy)){        /* sideways — leave it to the tray */
         if(Math.abs(dx)>slop) pending=null;
         return;
@@ -2136,7 +2141,7 @@ zin.onclick =()=>{cu=Math.min(190,cu+16);document.documentElement.style.setPrope
 zout.onclick=()=>{cu=Math.max(70,cu-16);document.documentElement.style.setProperty('--cu',cu);render();};
 addEventListener('resize',()=>{drawTray();paintDisplay();});
 addEventListener('load',()=>setTimeout(()=>splash.classList.add('gone'),900));
-document.getElementById('stop').onclick=stopAll;
+document.getElementById('stop').onclick=()=>{ stopAll(); stopSound(); motorStop(); };
 drawTray();render();
 
 
